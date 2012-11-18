@@ -1,37 +1,50 @@
+{-# LANGUAGE GADTs, FlexibleContexts, RankNTypes #-}
+
 import Crypto.Hash.SHA1 (hashlazy)
 import qualified Data.ByteString as Strict
 import qualified Data.ByteString.Lazy as Lazy
 import System.Process (system)
 import Text.Printf (printf)
 import Control.Monad
-import Control.Monad.State
+import Control.Monad.RWS
 
-hashFile :: FilePath -> IO Strict.ByteString
---hashFile = fmap hashlazy . Lazy.readFile 
---hashFile x = Lazy.readFile x >>= return . hashlazy
-hashFile = xx hashlazy . Lazy.readFile 
-
-xx f a = (>>=) a (return . f)
-
-toHex :: Strict.ByteString -> String
-toHex bytes = Strict.unpack bytes >>= printf "%02x"
-
-test :: FilePath -> IO ()
-test path = do
-  hashFile path >>= putStrLn . toHex
-  system $ "sha1sum " ++ path
-  return ()
+import FileSystem
+import FileSystem.Real
+import FileSystem.Fake as F
 
 
-
-
-data Foo m a = (Monad m) => Foo (m a)
-  
-data ObjectStore m = (Monad m) => ObjectStore {
-  putObj :: FilePath -> m (),
-  getObj :: String -> FilePath -> m ()
+data ServiceImplementation m = (Monad m) => ServiceImplementation
+  { serviceHello :: m ()
+  , serviceGetLine :: m String
+  , servicePutLine :: String -> m ()
   }
 
+serviceHelloBase :: (Monad m) => ServiceImplementation m -> m ()
+serviceHelloBase impl = do
+    name <- serviceGetLine impl
+    servicePutLine impl $ "Hello, " ++ name
+
+realImpl :: ServiceImplementation IO
+realImpl = ServiceImplementation
+  { serviceHello = serviceHelloBase realImpl
+  , serviceGetLine = getLine
+  , servicePutLine = putStrLn
+  }
+
+mockImpl :: (Monad m, MonadReader String m, MonadWriter String m) =>
+    ServiceImplementation m
+mockImpl = ServiceImplementation
+  { serviceHello = serviceHelloBase mockImpl
+  , serviceGetLine = ask
+  , servicePutLine = tell
+  }
+
+--main = serviceHello realImpl
+--test = case runRWS (serviceHello mockImpl) "Dave" () of
+--    (_, _, "Hello, Dave") -> True; _ -> False
 
 
---x = State
+doStuff :: (Monad m) => FileSystem m -> m ()
+doStuff fs = do
+  fsMkdir fs $ "testdir"
+  
