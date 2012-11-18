@@ -2,8 +2,12 @@ module FileSystem.Fake(
   fakeFs, 
   FakeFs(..), 
   FsEnt(..), 
-  runState, 
+  module Control.Monad.State,
   fromList, 
+  prefixes,
+  dirname,
+  writeFile,
+  writeFileS,
   dirFlag) where
 
 import Prelude hiding (writeFile, readFile)
@@ -18,7 +22,11 @@ import Control.Exception
 import qualified Data.ByteString.Lazy.UTF8 as U
 
 data FsEnt = File { content :: Lazy.ByteString } | Dir
-  deriving (Eq, Show)
+  deriving (Eq)
+
+instance Show FsEnt where
+  show Dir = dirFlag
+  show (File c) = show $ U.toString c
 
 data FakeFs = FakeFs { entries :: M.Map FilePath FsEnt }
   deriving (Eq)
@@ -56,14 +64,19 @@ joiner m a b = a ++ m ++ b
 dirname path = foldl1 (joiner "/") (init $ splitPath path)
 
 -- | takes a path and returns all prefixes
--- e.g. "a/b/c" -> ["a", "a/b", "a/b/c"]
+-- e.g. "/a/b/c" -> ["/a", "/a/b", "/a/b/c"]
 prefixes :: FilePath -> [FilePath]
-prefixes = scanl1 (joiner "/") . splitPath
+prefixes = tail . scanl1 (joiner "/") . splitPath
 
-assertPath :: FilePath -> FakeFs -> FakeFs
-assertPath path fs
-  | all (flip M.member $ entries fs) (prefixes path) = fs
+assertDir :: FilePath -> FakeFs -> FakeFs
+assertDir path fs
+  | all assertDir (prefixes path) = fs
   | otherwise = error $ "Path does not exist: '" ++ path ++ "'"
+  where
+    assertDir p = case M.lookup p (entries fs) of
+      Just Dir      -> True
+      Just (File _) -> error $ show p ++ " is a file"
+      Nothing       -> error $ show p ++ " does not exist"
 
 
 dirFlag = "<D>"
@@ -82,7 +95,9 @@ fromList entries = FakeFs . M.fromList $
 writeFile :: FilePath -> Lazy.ByteString -> FakeFs -> FakeFs
 --writeFile path content fs = FakeFs $ M.insert path (File $ U.fromString content) m
 writeFile path content fs = FakeFs $ M.insert path (File content) m
-  where m = entries $ assertPath (dirname path) fs
+  where m = entries $ assertDir (dirname path) fs
+
+writeFileS p c fs = writeFile p (U.fromString c) fs
 
 --
 --lazyRead :: FilePath -> FsState Lazy.ByteString
