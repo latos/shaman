@@ -7,7 +7,7 @@ import qualified Data.ByteString.Lazy as Lazy
 import Control.Monad.RWS
 
 data FileSystem m = (Monad m) => FileSystem
-  { fsLazyRead :: FilePath -> m Lazy.ByteString
+  { fsRead :: FilePath -> m Lazy.ByteString
   , fsCopy     :: FilePath -> FilePath -> m ()
   , fsMkdir    :: FilePath -> m ()
   }

@@ -46,5 +46,7 @@ mockImpl = ServiceImplementation
 
 doStuff :: (Monad m) => FileSystem m -> m ()
 doStuff fs = do
-  fsMkdir fs $ "testdir"
+  fsMkdir fs "testdir"
+  fsCopy fs "test.hs" "testdir/x.hs"
+
   

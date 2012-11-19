@@ -5,10 +5,12 @@ module FileSystem.Fake(
   module Control.Monad.State,
   fromList, 
   prefixes,
+  splitPath,
   dirname,
+  readFile,
   writeFile,
-  writeFileS,
-  dirFlag) where
+  writeFile',
+  mkdir) where
 
 import Prelude hiding (writeFile, readFile)
 
@@ -16,34 +18,31 @@ import qualified Data.ByteString.Lazy as Lazy
 import FileSystem
 import Control.Monad.State
 import qualified Data.Map as M
+import Data.List(partition)
 import Data.Map((!))
 import Data.List.Split
 import Control.Exception
 import qualified Data.ByteString.Lazy.UTF8 as U
+import qualified Data.Bifunctor as B
 
-data FsEnt = File { content :: Lazy.ByteString } | Dir
+data FsEnt = File { content :: Lazy.ByteString } | Dir (M.Map String FsEnt)
   deriving (Eq)
 
 instance Show FsEnt where
-  show Dir = dirFlag
-  show (File c) = show $ U.toString c
+  show e = foldl (joiner "\n") "== FsEnt ==" $ showEntry "" e
 
-data FakeFs = FakeFs { entries :: M.Map FilePath FsEnt }
-  deriving (Eq)
+showEntry :: String -> FsEnt -> [String]
+showEntry prefix (File c) = [prefix ++ " " ++ show (U.toString c)]
+showEntry prefix (Dir m) = (prefix' :)
+  $ map (prefix' ++) 
+  $ M.toList m >>= uncurry showEntry
+  where prefix' = prefix ++ "/"
 
-instance Show FakeFs where
-  show (FakeFs entries) = foldl (joiner "\n") "FakeFs" $ 
-    map (uncurry showEntry) (M.toList entries)
-    where
-      showEntry "" Dir = "d /"
-      showEntry k Dir = "d " ++ k
-      showEntry k (File c) = "f " ++ k ++ " " ++ show (U.toString c)
-
---new :: FsState
---new = state $ FakeFs (M.singleton "" Dir)
+type FakeFs = FsEnt
 
 type FsState = State FakeFs
 
+empty = Dir M.empty
 
 assert' t msg v
   | t         = v
@@ -54,8 +53,7 @@ assertF' f msg v = assert' (f v) msg v
 splitPath p = id
   $ assertF' (all (/= "") . tail) ("Empty path component in " ++ show p)
   $ assertF' ((/= "") . last)     ("Trailing '/' in " ++ show p)
-  $ assertF' ((== "") . head)     ("Path must start with '/' got " ++ show p)
-  $ assert'  (p /= "") ("Empty path")
+  $ assertF' ((/= "") . head)     ("Leading '/' in " ++ show p)
   $ splitOn "/" p
 
 
@@ -68,58 +66,63 @@ dirname path = foldl1 (joiner "/") (init $ splitPath path)
 prefixes :: FilePath -> [FilePath]
 prefixes = tail . scanl1 (joiner "/") . splitPath
 
-assertDir :: FilePath -> FakeFs -> FakeFs
-assertDir path fs
-  | all assertDir (prefixes path) = fs
-  | otherwise = error $ "Path does not exist: '" ++ path ++ "'"
-  where
-    assertDir p = case M.lookup p (entries fs) of
-      Just Dir      -> True
-      Just (File _) -> error $ show p ++ " is a file"
-      Nothing       -> error $ show p ++ " does not exist"
-
-
-dirFlag = "<D>"
-
-mapSnd f (a, b) = (a, f b)
-
 fromList :: [(FilePath, String)] -> FakeFs
-fromList entries = FakeFs . M.fromList $ 
-  -- expand all paths and treat as dirs
-  (map (\p -> (p, Dir)) expandedPaths) ++
-  -- clobber any non-dir entries with file entries
-  (map (mapSnd (File . U.fromString)) (filter ((/= dirFlag) . snd) entries))
+fromList entries = dirsAndFiles
   where
-    expandedPaths = fst (unzip entries) >>= prefixes
-
-writeFile :: FilePath -> Lazy.ByteString -> FakeFs -> FakeFs
---writeFile path content fs = FakeFs $ M.insert path (File $ U.fromString content) m
-writeFile path content fs = FakeFs $ M.insert path (File content) m
-  where m = entries $ assertDir (dirname path) fs
-
-writeFileS p c fs = writeFile p (U.fromString c) fs
-
---
---lazyRead :: FilePath -> FsState Lazy.ByteString
---lazyRead fp = do
---  fs <- get
---  return $ content $ (entries fs) ! fp
-
---writeFile :: FilePath -> String -> FsState ()
---writeFile fp content = modify $ \s ->
+    justDirs     = foldr mkdir empty dirs
+    dirsAndFiles = foldr (\(p, c) -> writeFile' c p) justDirs files
+    
+    dirs = map (init . fst) dirs' ++ (map dirname . filter (any (=='/')) . map fst) files
+    (dirs', files) = partition ((== '/') . last . fst) entries
 
 copyFile :: FilePath -> FilePath -> FakeFs -> FakeFs
-copyFile from to fs = writeFile to (readFile from fs) fs
+copyFile from to fs = writeFile (readFile from fs) to fs
 
 readFile :: FilePath -> FakeFs -> Lazy.ByteString
-readFile path fs = content $ (entries fs) ! path
+readFile fullPath = read' (splitPath fullPath)
+  where
+    read' [] (File c) = c
+    read' [] (Dir  _) = err "is a directory"
+    read' (n:ns) (File _) = err "does not exist"
+    read' (n:ns) (Dir  m) = case M.lookup n m of
+      Just sub -> read' ns sub
+      Nothing  -> err "does not exist"
+    err = mkErr "readFile" fullPath
+
+writeFile :: Lazy.ByteString -> FilePath -> FakeFs -> FakeFs
+writeFile content fullPath = write' (splitPath fullPath)
+  where
+    write' [] (File _) = File content
+    write' [] (Dir  _) = err "is a directory"
+    write' [n] (Dir m) = Dir (M.insert n (File content) m)
+    write' (n:ns) (File _) = err "does not exist"
+    write' (n:ns) (Dir  m) = case M.lookup n m of
+      Just sub -> Dir (M.insert n (write' ns sub) m)
+      Nothing  -> err "does not exist"
+    err = mkErr "writeFile" fullPath
+
+mkdir :: FilePath -> FakeFs -> FakeFs
+mkdir fullPath = mkdir' (splitPath fullPath)
+  where
+    mkdir' [] (File c) = err "is a file"
+    mkdir' [] d        = d
+    mkdir' (n:ns) (File _) = err "subpath is file"
+    mkdir' (n:ns) (Dir  m) = Dir (M.insert n (mkdir' ns (M.findWithDefault empty n m)) m)
+    err = mkErr "mkdir" fullPath
+
+mkErr fn p = error . ((fn ++ ": " ++ show p ++ " ") ++)
+
+-- | Convenience alternative that takes a String as the file contents.
+writeFile' :: String -> FilePath -> FakeFs -> FakeFs
+writeFile' = writeFile . U.fromString
+
 
 -- compose with the 2nd
 c2 f g a = f . g a
 
 fakeFs :: FileSystem FsState
 fakeFs = FileSystem
-  { fsLazyRead = gets . readFile
+  { fsRead = gets . readFile
   , fsCopy     = modify `c2` copyFile
-  , fsMkdir    = error "hi"
+  , fsMkdir    = modify . mkdir
   }
